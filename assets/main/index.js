@@ -575,6 +575,439 @@ window.__require = function e(t, n, r) {
     Object.defineProperty(exports, "__esModule", {
       value: true
     });
+    var core = require("@capacitor/core");
+    exports.Directory = void 0;
+    (function(Directory) {
+      Directory["Documents"] = "DOCUMENTS";
+      Directory["Data"] = "DATA";
+      Directory["Library"] = "LIBRARY";
+      Directory["Cache"] = "CACHE";
+      Directory["External"] = "EXTERNAL";
+      Directory["ExternalStorage"] = "EXTERNAL_STORAGE";
+    })(exports.Directory || (exports.Directory = {}));
+    exports.Encoding = void 0;
+    (function(Encoding) {
+      Encoding["UTF8"] = "utf8";
+      Encoding["ASCII"] = "ascii";
+      Encoding["UTF16"] = "utf16";
+    })(exports.Encoding || (exports.Encoding = {}));
+    const FilesystemDirectory = exports.Directory;
+    const FilesystemEncoding = exports.Encoding;
+    const Filesystem = core.registerPlugin("Filesystem", {
+      web: () => Promise.resolve().then(function() {
+        return web;
+      }).then(m => new m.FilesystemWeb())
+    });
+    function resolve(path) {
+      const posix = path.split("/").filter(item => "." !== item);
+      const newPosix = [];
+      posix.forEach(item => {
+        ".." === item && newPosix.length > 0 && ".." !== newPosix[newPosix.length - 1] ? newPosix.pop() : newPosix.push(item);
+      });
+      return newPosix.join("/");
+    }
+    function isPathParent(parent, children) {
+      parent = resolve(parent);
+      children = resolve(children);
+      const pathsA = parent.split("/");
+      const pathsB = children.split("/");
+      return parent !== children && pathsA.every((value, index) => value === pathsB[index]);
+    }
+    class FilesystemWeb extends core.WebPlugin {
+      constructor() {
+        super(...arguments);
+        this.DB_VERSION = 1;
+        this.DB_NAME = "Disc";
+        this._writeCmds = [ "add", "put", "delete" ];
+      }
+      async initDb() {
+        if (void 0 !== this._db) return this._db;
+        if (!("indexedDB" in window)) throw this.unavailable("This browser doesn't support IndexedDB");
+        return new Promise((resolve, reject) => {
+          const request = indexedDB.open(this.DB_NAME, this.DB_VERSION);
+          request.onupgradeneeded = FilesystemWeb.doUpgrade;
+          request.onsuccess = () => {
+            this._db = request.result;
+            resolve(request.result);
+          };
+          request.onerror = () => reject(request.error);
+          request.onblocked = () => {
+            console.warn("db blocked");
+          };
+        });
+      }
+      static doUpgrade(event) {
+        const eventTarget = event.target;
+        const db = eventTarget.result;
+        switch (event.oldVersion) {
+         case 0:
+         case 1:
+         default:
+          {
+            db.objectStoreNames.contains("FileStorage") && db.deleteObjectStore("FileStorage");
+            const store = db.createObjectStore("FileStorage", {
+              keyPath: "path"
+            });
+            store.createIndex("by_folder", "folder");
+          }
+        }
+      }
+      async dbRequest(cmd, args) {
+        const readFlag = -1 !== this._writeCmds.indexOf(cmd) ? "readwrite" : "readonly";
+        return this.initDb().then(conn => new Promise((resolve, reject) => {
+          const tx = conn.transaction([ "FileStorage" ], readFlag);
+          const store = tx.objectStore("FileStorage");
+          const req = store[cmd](...args);
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        }));
+      }
+      async dbIndexRequest(indexName, cmd, args) {
+        const readFlag = -1 !== this._writeCmds.indexOf(cmd) ? "readwrite" : "readonly";
+        return this.initDb().then(conn => new Promise((resolve, reject) => {
+          const tx = conn.transaction([ "FileStorage" ], readFlag);
+          const store = tx.objectStore("FileStorage");
+          const index = store.index(indexName);
+          const req = index[cmd](...args);
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        }));
+      }
+      getPath(directory, uriPath) {
+        const cleanedUriPath = void 0 !== uriPath ? uriPath.replace(/^[/]+|[/]+$/g, "") : "";
+        let fsPath = "";
+        void 0 !== directory && (fsPath += "/" + directory);
+        "" !== uriPath && (fsPath += "/" + cleanedUriPath);
+        return fsPath;
+      }
+      async clear() {
+        const conn = await this.initDb();
+        const tx = conn.transaction([ "FileStorage" ], "readwrite");
+        const store = tx.objectStore("FileStorage");
+        store.clear();
+      }
+      async readFile(options) {
+        const path = this.getPath(options.directory, options.path);
+        const entry = await this.dbRequest("get", [ path ]);
+        if (void 0 === entry) throw Error("File does not exist.");
+        return {
+          data: entry.content ? entry.content : ""
+        };
+      }
+      async writeFile(options) {
+        const path = this.getPath(options.directory, options.path);
+        let data = options.data;
+        const encoding = options.encoding;
+        const doRecursive = options.recursive;
+        const occupiedEntry = await this.dbRequest("get", [ path ]);
+        if (occupiedEntry && "directory" === occupiedEntry.type) throw Error("The supplied path is a directory.");
+        const parentPath = path.substr(0, path.lastIndexOf("/"));
+        const parentEntry = await this.dbRequest("get", [ parentPath ]);
+        if (void 0 === parentEntry) {
+          const subDirIndex = parentPath.indexOf("/", 1);
+          if (-1 !== subDirIndex) {
+            const parentArgPath = parentPath.substr(subDirIndex);
+            await this.mkdir({
+              path: parentArgPath,
+              directory: options.directory,
+              recursive: doRecursive
+            });
+          }
+        }
+        if (!encoding) {
+          data = data.indexOf(",") >= 0 ? data.split(",")[1] : data;
+          if (!this.isBase64String(data)) throw Error("The supplied data is not valid base64 content.");
+        }
+        const now = Date.now();
+        const pathObj = {
+          path: path,
+          folder: parentPath,
+          type: "file",
+          size: data.length,
+          ctime: now,
+          mtime: now,
+          content: data
+        };
+        await this.dbRequest("put", [ pathObj ]);
+        return {
+          uri: pathObj.path
+        };
+      }
+      async appendFile(options) {
+        const path = this.getPath(options.directory, options.path);
+        let data = options.data;
+        const encoding = options.encoding;
+        const parentPath = path.substr(0, path.lastIndexOf("/"));
+        const now = Date.now();
+        let ctime = now;
+        const occupiedEntry = await this.dbRequest("get", [ path ]);
+        if (occupiedEntry && "directory" === occupiedEntry.type) throw Error("The supplied path is a directory.");
+        const parentEntry = await this.dbRequest("get", [ parentPath ]);
+        if (void 0 === parentEntry) {
+          const subDirIndex = parentPath.indexOf("/", 1);
+          if (-1 !== subDirIndex) {
+            const parentArgPath = parentPath.substr(subDirIndex);
+            await this.mkdir({
+              path: parentArgPath,
+              directory: options.directory,
+              recursive: true
+            });
+          }
+        }
+        if (!encoding && !this.isBase64String(data)) throw Error("The supplied data is not valid base64 content.");
+        if (void 0 !== occupiedEntry) {
+          data = void 0 === occupiedEntry.content || encoding ? occupiedEntry.content + data : btoa(atob(occupiedEntry.content) + atob(data));
+          ctime = occupiedEntry.ctime;
+        }
+        const pathObj = {
+          path: path,
+          folder: parentPath,
+          type: "file",
+          size: data.length,
+          ctime: ctime,
+          mtime: now,
+          content: data
+        };
+        await this.dbRequest("put", [ pathObj ]);
+      }
+      async deleteFile(options) {
+        const path = this.getPath(options.directory, options.path);
+        const entry = await this.dbRequest("get", [ path ]);
+        if (void 0 === entry) throw Error("File does not exist.");
+        const entries = await this.dbIndexRequest("by_folder", "getAllKeys", [ IDBKeyRange.only(path) ]);
+        if (0 !== entries.length) throw Error("Folder is not empty.");
+        await this.dbRequest("delete", [ path ]);
+      }
+      async mkdir(options) {
+        const path = this.getPath(options.directory, options.path);
+        const doRecursive = options.recursive;
+        const parentPath = path.substr(0, path.lastIndexOf("/"));
+        const depth = (path.match(/\//g) || []).length;
+        const parentEntry = await this.dbRequest("get", [ parentPath ]);
+        const occupiedEntry = await this.dbRequest("get", [ path ]);
+        if (1 === depth) throw Error("Cannot create Root directory");
+        if (void 0 !== occupiedEntry) throw Error("Current directory does already exist.");
+        if (!doRecursive && 2 !== depth && void 0 === parentEntry) throw Error("Parent directory must exist");
+        if (doRecursive && 2 !== depth && void 0 === parentEntry) {
+          const parentArgPath = parentPath.substr(parentPath.indexOf("/", 1));
+          await this.mkdir({
+            path: parentArgPath,
+            directory: options.directory,
+            recursive: doRecursive
+          });
+        }
+        const now = Date.now();
+        const pathObj = {
+          path: path,
+          folder: parentPath,
+          type: "directory",
+          size: 0,
+          ctime: now,
+          mtime: now
+        };
+        await this.dbRequest("put", [ pathObj ]);
+      }
+      async rmdir(options) {
+        const {path: path, directory: directory, recursive: recursive} = options;
+        const fullPath = this.getPath(directory, path);
+        const entry = await this.dbRequest("get", [ fullPath ]);
+        if (void 0 === entry) throw Error("Folder does not exist.");
+        if ("directory" !== entry.type) throw Error("Requested path is not a directory");
+        const readDirResult = await this.readdir({
+          path: path,
+          directory: directory
+        });
+        if (0 !== readDirResult.files.length && !recursive) throw Error("Folder is not empty");
+        for (const entry of readDirResult.files) {
+          const entryPath = `${path}/${entry.name}`;
+          const entryObj = await this.stat({
+            path: entryPath,
+            directory: directory
+          });
+          "file" === entryObj.type ? await this.deleteFile({
+            path: entryPath,
+            directory: directory
+          }) : await this.rmdir({
+            path: entryPath,
+            directory: directory,
+            recursive: recursive
+          });
+        }
+        await this.dbRequest("delete", [ fullPath ]);
+      }
+      async readdir(options) {
+        const path = this.getPath(options.directory, options.path);
+        const entry = await this.dbRequest("get", [ path ]);
+        if ("" !== options.path && void 0 === entry) throw Error("Folder does not exist.");
+        const entries = await this.dbIndexRequest("by_folder", "getAllKeys", [ IDBKeyRange.only(path) ]);
+        const files = await Promise.all(entries.map(async e => {
+          let subEntry = await this.dbRequest("get", [ e ]);
+          void 0 === subEntry && (subEntry = await this.dbRequest("get", [ e + "/" ]));
+          return {
+            name: e.substring(path.length + 1),
+            type: subEntry.type,
+            size: subEntry.size,
+            ctime: subEntry.ctime,
+            mtime: subEntry.mtime,
+            uri: subEntry.path
+          };
+        }));
+        return {
+          files: files
+        };
+      }
+      async getUri(options) {
+        const path = this.getPath(options.directory, options.path);
+        let entry = await this.dbRequest("get", [ path ]);
+        void 0 === entry && (entry = await this.dbRequest("get", [ path + "/" ]));
+        return {
+          uri: (null === entry || void 0 === entry ? void 0 : entry.path) || path
+        };
+      }
+      async stat(options) {
+        const path = this.getPath(options.directory, options.path);
+        let entry = await this.dbRequest("get", [ path ]);
+        void 0 === entry && (entry = await this.dbRequest("get", [ path + "/" ]));
+        if (void 0 === entry) throw Error("Entry does not exist.");
+        return {
+          type: entry.type,
+          size: entry.size,
+          ctime: entry.ctime,
+          mtime: entry.mtime,
+          uri: entry.path
+        };
+      }
+      async rename(options) {
+        await this._copy(options, true);
+        return;
+      }
+      async copy(options) {
+        return this._copy(options, false);
+      }
+      async requestPermissions() {
+        return {
+          publicStorage: "granted"
+        };
+      }
+      async checkPermissions() {
+        return {
+          publicStorage: "granted"
+        };
+      }
+      async _copy(options, doRename = false) {
+        let {toDirectory: toDirectory} = options;
+        const {to: to, from: from, directory: fromDirectory} = options;
+        if (!to || !from) throw Error("Both to and from must be provided");
+        toDirectory || (toDirectory = fromDirectory);
+        const fromPath = this.getPath(fromDirectory, from);
+        const toPath = this.getPath(toDirectory, to);
+        if (fromPath === toPath) return {
+          uri: toPath
+        };
+        if (isPathParent(fromPath, toPath)) throw Error("To path cannot contain the from path");
+        let toObj;
+        try {
+          toObj = await this.stat({
+            path: to,
+            directory: toDirectory
+          });
+        } catch (e) {
+          const toPathComponents = to.split("/");
+          toPathComponents.pop();
+          const toPath = toPathComponents.join("/");
+          if (toPathComponents.length > 0) {
+            const toParentDirectory = await this.stat({
+              path: toPath,
+              directory: toDirectory
+            });
+            if ("directory" !== toParentDirectory.type) throw new Error("Parent directory of the to path is a file");
+          }
+        }
+        if (toObj && "directory" === toObj.type) throw new Error("Cannot overwrite a directory with a file");
+        const fromObj = await this.stat({
+          path: from,
+          directory: fromDirectory
+        });
+        const updateTime = async (path, ctime, mtime) => {
+          const fullPath = this.getPath(toDirectory, path);
+          const entry = await this.dbRequest("get", [ fullPath ]);
+          entry.ctime = ctime;
+          entry.mtime = mtime;
+          await this.dbRequest("put", [ entry ]);
+        };
+        const ctime = fromObj.ctime ? fromObj.ctime : Date.now();
+        switch (fromObj.type) {
+         case "file":
+          {
+            const file = await this.readFile({
+              path: from,
+              directory: fromDirectory
+            });
+            doRename && await this.deleteFile({
+              path: from,
+              directory: fromDirectory
+            });
+            const writeResult = await this.writeFile({
+              path: to,
+              directory: toDirectory,
+              data: file.data
+            });
+            doRename && await updateTime(to, ctime, fromObj.mtime);
+            return writeResult;
+          }
+
+         case "directory":
+          {
+            if (toObj) throw Error("Cannot move a directory over an existing object");
+            try {
+              await this.mkdir({
+                path: to,
+                directory: toDirectory,
+                recursive: false
+              });
+              doRename && await updateTime(to, ctime, fromObj.mtime);
+            } catch (e) {}
+            const contents = (await this.readdir({
+              path: from,
+              directory: fromDirectory
+            })).files;
+            for (const filename of contents) await this._copy({
+              from: `${from}/${filename}`,
+              to: `${to}/${filename}`,
+              directory: fromDirectory,
+              toDirectory: toDirectory
+            }, doRename);
+            doRename && await this.rmdir({
+              path: from,
+              directory: fromDirectory
+            });
+          }
+        }
+        return {
+          uri: toPath
+        };
+      }
+      isBase64String(str) {
+        const base64regex = /^([0-9a-zA-Z+/]{4})*(([0-9a-zA-Z+/]{2}==)|([0-9a-zA-Z+/]{3}=))?$/;
+        return base64regex.test(str);
+      }
+    }
+    FilesystemWeb._debug = true;
+    var web = Object.freeze({
+      __proto__: null,
+      FilesystemWeb: FilesystemWeb
+    });
+    exports.Filesystem = Filesystem;
+    exports.FilesystemDirectory = FilesystemDirectory;
+    exports.FilesystemEncoding = FilesystemEncoding;
+  }, {
+    "@capacitor/core": 1
+  } ],
+  3: [ function(require, module, exports) {
+    "use strict";
+    Object.defineProperty(exports, "__esModule", {
+      value: true
+    });
     var tslib = require("tslib");
     var firebase = require("@firebase/app");
     require("@firebase/installations");
@@ -1384,14 +1817,14 @@ window.__require = function e(t, n, r) {
     exports.resetGlobalVars = resetGlobalVars;
     exports.settings = settings;
   }, {
-    "@firebase/app": 4,
-    "@firebase/component": 6,
-    "@firebase/installations": 8,
-    "@firebase/logger": 10,
-    "@firebase/util": 11,
-    tslib: 3
+    "@firebase/app": 5,
+    "@firebase/component": 7,
+    "@firebase/installations": 9,
+    "@firebase/logger": 11,
+    "@firebase/util": 12,
+    tslib: 4
   } ],
-  3: [ function(require, module, exports) {
+  4: [ function(require, module, exports) {
     (function(global) {
       var __extends;
       var __assign;
@@ -1764,7 +2197,7 @@ window.__require = function e(t, n, r) {
       });
     }).call(this, "undefined" !== typeof global ? global : "undefined" !== typeof self ? self : "undefined" !== typeof window ? window : {});
   }, {} ],
-  4: [ function(require, module, exports) {
+  5: [ function(require, module, exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", {
       value: true
@@ -2101,17 +2534,17 @@ window.__require = function e(t, n, r) {
     exports.default = firebase$1;
     exports.firebase = firebase$1;
   }, {
-    "@firebase/component": 6,
-    "@firebase/logger": 10,
-    "@firebase/util": 11,
-    tslib: 5
-  } ],
-  5: [ function(require, module, exports) {
-    arguments[4][3][0].apply(exports, arguments);
-  }, {
-    dup: 3
+    "@firebase/component": 7,
+    "@firebase/logger": 11,
+    "@firebase/util": 12,
+    tslib: 6
   } ],
   6: [ function(require, module, exports) {
+    arguments[4][4][0].apply(exports, arguments);
+  }, {
+    dup: 4
+  } ],
+  7: [ function(require, module, exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", {
       value: true
@@ -2294,15 +2727,15 @@ window.__require = function e(t, n, r) {
     exports.ComponentContainer = ComponentContainer;
     exports.Provider = Provider;
   }, {
-    "@firebase/util": 11,
-    tslib: 7
-  } ],
-  7: [ function(require, module, exports) {
-    arguments[4][3][0].apply(exports, arguments);
-  }, {
-    dup: 3
+    "@firebase/util": 12,
+    tslib: 8
   } ],
   8: [ function(require, module, exports) {
+    arguments[4][4][0].apply(exports, arguments);
+  }, {
+    dup: 4
+  } ],
+  9: [ function(require, module, exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", {
       value: true
@@ -3237,18 +3670,18 @@ window.__require = function e(t, n, r) {
     registerInstallations(firebase__default["default"]);
     exports.registerInstallations = registerInstallations;
   }, {
-    "@firebase/app": 4,
-    "@firebase/component": 6,
-    "@firebase/util": 11,
-    idb: 15,
-    tslib: 9
-  } ],
-  9: [ function(require, module, exports) {
-    arguments[4][3][0].apply(exports, arguments);
-  }, {
-    dup: 3
+    "@firebase/app": 5,
+    "@firebase/component": 7,
+    "@firebase/util": 12,
+    idb: 16,
+    tslib: 10
   } ],
   10: [ function(require, module, exports) {
+    arguments[4][4][0].apply(exports, arguments);
+  }, {
+    dup: 4
+  } ],
+  11: [ function(require, module, exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", {
       value: true
@@ -3407,7 +3840,7 @@ window.__require = function e(t, n, r) {
     exports.setLogLevel = setLogLevel;
     exports.setUserLogHandler = setUserLogHandler;
   }, {} ],
-  11: [ function(require, module, exports) {
+  12: [ function(require, module, exports) {
     (function(global) {
       "use strict";
       Object.defineProperty(exports, "__esModule", {
@@ -4204,20 +4637,20 @@ window.__require = function e(t, n, r) {
       exports.validateNamespace = validateNamespace;
     }).call(this, "undefined" !== typeof global ? global : "undefined" !== typeof self ? self : "undefined" !== typeof window ? window : {});
   }, {
-    tslib: 12
-  } ],
-  12: [ function(require, module, exports) {
-    arguments[4][3][0].apply(exports, arguments);
-  }, {
-    dup: 3
+    tslib: 13
   } ],
   13: [ function(require, module, exports) {
+    arguments[4][4][0].apply(exports, arguments);
+  }, {
+    dup: 4
+  } ],
+  14: [ function(require, module, exports) {
     "use strict";
     require("@firebase/analytics");
   }, {
-    "@firebase/analytics": 2
+    "@firebase/analytics": 3
   } ],
-  14: [ function(require, module, exports) {
+  15: [ function(require, module, exports) {
     "use strict";
     var firebase = require("@firebase/app");
     function _interopDefaultLegacy(e) {
@@ -4231,9 +4664,9 @@ window.__require = function e(t, n, r) {
     firebase__default["default"].registerVersion(name, version, "app");
     module.exports = firebase__default["default"];
   }, {
-    "@firebase/app": 4
+    "@firebase/app": 5
   } ],
-  15: [ function(require, module, exports) {
+  16: [ function(require, module, exports) {
     (function(global, factory) {
       "object" === typeof exports && "undefined" !== typeof module ? factory(exports) : "function" === typeof define && define.amd ? define([ "exports" ], factory) : (global = global || self, 
       factory(global.idb = {}));
@@ -6839,26 +7272,32 @@ window.__require = function e(t, n, r) {
       }
       Chimple_1 = Chimple;
       Chimple.prototype.onLoad = function() {
+        var _a, _b;
         return __awaiter(this, void 0, void 0, function() {
-          var lang, langConfig, teachersAdded, updates, subpackages, doRestart;
+          var params, urlParams, _i, params_1, param, isIframe, input, lang, langConfig, teachersAdded, updates, subpackages, doRestart;
           var _this = this;
-          return __generator(this, function(_a) {
+          return __generator(this, function(_c) {
             cc.sys.isNative && jsb.fileUtils.setSearchPaths([ jsb.fileUtils.getWritablePath() + "HotUpdateSearchPaths", "@assets/" ]);
-            if ("android" === core_1.Capacitor.getPlatform()) {
-              cc.log("platform is android");
-              core_1.Capacitor.convertFileSrc("file:///data/user/0/org.chimple.cubachimple/files/games/");
+            "android" === core_1.Capacitor.getPlatform() && cc.log("platform is android");
+            params = null !== (_b = null === (_a = location.href.split("?")[1]) || void 0 === _a ? void 0 : _a.split("&")) && void 0 !== _b ? _b : [];
+            urlParams = {};
+            for (_i = 0, params_1 = params; _i < params_1.length; _i++) {
+              param = params_1[_i];
+              urlParams[param.split("=")[0]] = param.split("=")[1];
             }
-            var params = location.href.split('?')[1].split('&');
-            cc.log("params",params);
-
-              let data = {};
-              for (let x in params)
-              {
-              data[params[x].split('=')[0]] = params[x].split('=')[1];
-              cc.log("xxxxx",x)
-              }
-              cc.log("xxxxx data",data)
-
+            isIframe = !(window === window.parent);
+            cc.log("xxxxx data", urlParams, "isIframe", isIframe);
+            if (null != urlParams["courseid"] && null != urlParams["chapterid"] && null != urlParams["lessonid"]) {
+              input = {
+                courseid: urlParams["courseid"],
+                chapterid: urlParams["chapterid"],
+                lessonid: urlParams["lessonid"]
+              };
+              console.log("input", input);
+              config_1.default.isMicroLink = true;
+              util_1.Util.loadDirectLessonWithLink(input, this.node);
+              return [ 2 ];
+            }
             cc.debug.setDisplayStats(false);
             ServiceConfig_1.ServiceConfig.getInstance(ServiceConfig_1.APIMode.FIREBASE);
             cc.macro.ENABLE_MULTI_TOUCH = false;
@@ -7053,13 +7492,6 @@ window.__require = function e(t, n, r) {
       return Chimple;
     }(cc.Component);
     exports.default = Chimple;
-    function todo() {
-      document.querySelector("#GameCanvas").hidden = true;
-      var node = document.createElement("div");
-      node.id = "capacitor";
-      node.innerHTML = '\n    <style>\n      :host {\n        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";\n        display: block;\n        width: 100%;\n        height: 100%;\n      }\n      h1, h2, h3, h4, h5 {\n        text-transform: uppercase;\n      }\n      .button {\n        display: inline-block;\n        padding: 10px;\n        background-color: #73B5F6;\n        color: #fff;\n        font-size: 0.9em;\n        border: 0;\n        border-radius: 3px;\n        text-decoration: none;\n        cursor: pointer;\n      }\n      main {\n        padding: 15px;\n        text-align: center;\n        grid-gap: 2rem;\n        display: flex;\n        flex-wrap: wrap;\n        align-items: center;\n        justify-content: center;\n      }\n      main hr { height: 1px; background-color: #eee; border: 0; }\n      main h1 {\n        font-size: 1.4em;\n        text-transform: uppercase;\n        letter-spacing: 1px;\n      }\n      main h2 {\n        font-size: 1.1em;\n      }\n      main h3 {\n        font-size: 0.9em;\n      }\n      main p {\n        color: #333;\n      }\n      main pre {\n        white-space: pre-line;\n      }\n    </style>\n    <div>\n      <h1>\n        <h1>Capacitor</h1>\n      </h1>\n      <main>\n      <div>\n        <img src="https://h5p.org/sites/default/files/styles/small-logo/public/logos/question-set-icon.png?itok=etOO1Me5" />\n        <h2>Quiz (Question Set)</h2>\n        <p>Create a sequence of various question types</p>\n        <button id="btn1" class="button">Play</button>\n      </div>\n      <div>\n      <img src="https://h5p.org/sites/default/files/styles/small-logo/public/logos/word-search-h5porg.png?itok=11OaLF7p" />\n      <h2>Find the words</h2>\n      <p>Grid word search game</p>\n      <button id="btn1" class="button">Play</button>\n    </div>\n    <div>\n      <img src="https://h5p.org/sites/default/files/styles/small-logo/public/logos/sort-paragraphs.png?itok=GMw1wP6Y" />\n      <h2>Sort the Paragraphs</h2>\n      <p>Create a set of paragraphs to be sorted</p>\n      <button id="btn1" class="button">Play</button>\n    </div>\n    <div>\n    <img src="https://h5p.org/sites/default/files/styles/small-logo/public/logos/multichoice-icon_0.png?itok=zkNVq9Tq" />\n    <h2>Multiple Choice</h2>\n    <p>Create flexible multiple choice questions</p>\n    <button id="btn1" class="button">Play</button>\n  </div>\n      </main>\n    </div>\n\n    ';
-      document.querySelector("#Cocos2dGameContainer").appendChild(node);
-    }
     cc._RF.pop();
   }, {
     "./common/scripts/lib/config": "config",
@@ -7151,6 +7583,7 @@ window.__require = function e(t, n, r) {
     var gameConfigs_1 = require("./gameConfigs");
     var constants_1 = require("./constants");
     var core_1 = require("@capacitor/core");
+    var filesystem_1 = require("@capacitor/filesystem");
     exports.DEFAULT_FONT = "main";
     exports.STORY = "story";
     exports.COURSES = [ "en", "en-maths", "hi", "hi-maths", "ur", "ur-maths", "mr" ];
@@ -7605,8 +8038,18 @@ window.__require = function e(t, n, r) {
       };
       Config.loadBundle = function(lessonId, callback, errCallback) {
         cc.assetManager.loadBundle(lessonId, function(err, bundle) {
+          var _a;
           if (err) if ("android" === core_1.Capacitor.getPlatform()) {
-            var path_1 = "http://localhost/_capacitor_file_/data/user/0/org.chimple.cubachimple/files/games/" + lessonId;
+            filesystem_1.Filesystem.getUri({
+              directory: filesystem_1.Directory.Data,
+              path: ""
+            }).then(function(dirPath) {
+              var path1 = "http://localhost/_capacitor_file_/" + dirPath.uri.substring(8) + "/" + lessonId;
+              console.log("cocos path", path1);
+            });
+            var gameUrl = null !== (_a = cc.sys.localStorage.getItem("gameUrl")) && void 0 !== _a ? _a : "http://localhost/_capacitor_file_/data/user/0/org.chimple.cuba/files/";
+            console.log("gameUrl", gameUrl, cc.sys.localStorage.getItem("gameUrl"));
+            var path_1 = gameUrl + lessonId;
             cc.assetManager.loadBundle(path_1, function(err2, bundle2) {
               cc.log("loaded bundle with path ", path_1, "err", err2, "bundle", bundle2);
               err2 ? cc.assetManager.loadBundle(constants_1.BUNDLE_URL + lessonId, function(err2, bundle2) {
@@ -7635,7 +8078,8 @@ window.__require = function e(t, n, r) {
     "./constants": "constants",
     "./gameConfigs": "gameConfigs",
     "./profile": "profile",
-    "@capacitor/core": 1
+    "@capacitor/core": 1,
+    "@capacitor/filesystem": 2
   } ],
   constants: [ function(require, module, exports) {
     "use strict";
@@ -11230,7 +11674,7 @@ window.__require = function e(t, n, r) {
       };
       LessonController.prototype.lessonEnd = function() {
         return __awaiter(this, void 0, void 0, function() {
-          var config, timeSpent, score, user, reward, finishedLessons_1, percentageComplete, updateInfo, mode, updateInfo_1, requestParams, error_1, block, scorecard, scorecardComp, gameConfig;
+          var config, timeSpent, score, isIframe, event, user, reward, finishedLessons_1, percentageComplete, updateInfo, mode, updateInfo_1, requestParams, error_1, block, scorecard, scorecardComp, gameConfig;
           return __generator(this, function(_a) {
             switch (_a.label) {
              case 0:
@@ -11240,6 +11684,24 @@ window.__require = function e(t, n, r) {
               Math.abs(timeSpent) > 1200 && (timeSpent = 1200);
               score = Math.round(this.totalQuizzes > 0 ? this.quizScore / this.totalQuizzes * 70 + this.rightMoves / (this.rightMoves + this.wrongMoves) * 30 : this.rightMoves / (this.rightMoves + this.wrongMoves) * 100);
               isNaN(score) && (score = 0);
+              isIframe = !(window === window.parent);
+              if (isIframe) {
+                event = new CustomEvent("gameEnd", {
+                  detail: {
+                    chapterName: config.chapter.name,
+                    chapterId: config.chapter.id,
+                    lessonName: config.lesson.name,
+                    lessonId: config.lesson.id,
+                    courseName: config.course.id,
+                    lessonType: config.lesson.type,
+                    score: score,
+                    timeSpent: Math.abs(timeSpent)
+                  }
+                });
+                window.parent.document.body.dispatchEvent(event);
+                console.log("event dispatched", event);
+                return [ 2 ];
+              }
               user = profile_1.User.getCurrentUser();
               if (user) {
                 reward = user.updateLessonProgress(config.lesson.id, score, this.quizScores, config.lesson.assignmentId);
@@ -17912,8 +18374,8 @@ window.__require = function e(t, n, r) {
     "../../chimple": "chimple",
     "./lib/constants": "constants",
     "./lib/profile": "profile",
-    "firebase/analytics": 13,
-    "firebase/app": 14
+    "firebase/analytics": 14,
+    "firebase/app": 15
   } ],
   util: [ function(require, module, exports) {
     "use strict";

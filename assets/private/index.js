@@ -800,22 +800,33 @@ window.__require = function e(t, n, r) {
         var _this = this;
         profile_1.User.getUsers().forEach(function(user) {
           if (_this.node.name == user.id) {
-            var event = new CustomEvent("build", {
-              detail: {
-                name: "sam",
-                age: 20,
-                user: profile_1.User.toJson(user)
+            var mode = parseInt(profile_1.default.getValue(profile_1.CURRENTMODE));
+            if (5 === mode || null != user.studentId) {
+              var studentJson = util_logger_1.default.fetchStudentById(user.studentId);
+              var student = void 0;
+              var studentMap = void 0;
+              if (!!studentJson) {
+                student = JSON.parse(studentJson);
+                !(null === student || void 0 === student ? void 0 : student.profileInfo) || (studentMap = JSON.parse(null === student || void 0 === student ? void 0 : student.profileInfo));
               }
-            });
-            window.parent.document.body.dispatchEvent(event);
-            console.log("event dispatched", event);
-            return;
-            var mode;
-            var studentJson;
-            var student;
-            var studentMap;
-            var isConnected;
-            var tempUser;
+              cc.log("studentJson1", studentJson);
+              var isConnected = user.isConnected;
+              if (!!student && !!(null === studentMap || void 0 === studentMap ? void 0 : studentMap.courseProgressMap) && isConnected) {
+                var tempUser = profile_1.User.fromJson(student.profileInfo);
+                cc.log("studentJson1 user json ", null === tempUser || void 0 === tempUser ? void 0 : tempUser.id, null === tempUser || void 0 === tempUser ? void 0 : tempUser.name, null === tempUser || void 0 === tempUser ? void 0 : tempUser.age, null === tempUser || void 0 === tempUser ? void 0 : tempUser.gender, null === tempUser || void 0 === tempUser ? void 0 : tempUser.imgPath, null === tempUser || void 0 === tempUser ? void 0 : tempUser.avatarImage, null === tempUser || void 0 === tempUser ? void 0 : tempUser.isTeacher, null === tempUser || void 0 === tempUser ? void 0 : tempUser.inventory, null === tempUser || void 0 === tempUser ? void 0 : tempUser.currentBg, null === tempUser || void 0 === tempUser ? void 0 : tempUser.currentCharacter, null === tempUser || void 0 === tempUser ? void 0 : tempUser.courseProgressMap, null === tempUser || void 0 === tempUser ? void 0 : tempUser.lessonProgressMap, null === tempUser || void 0 === tempUser ? void 0 : tempUser.unlockedInventory, null === tempUser || void 0 === tempUser ? void 0 : tempUser.unlockedRewards, null === tempUser || void 0 === tempUser ? void 0 : tempUser.debug, null === tempUser || void 0 === tempUser ? void 0 : tempUser.serverId, null === tempUser || void 0 === tempUser ? void 0 : tempUser.schoolId, null === tempUser || void 0 === tempUser ? void 0 : tempUser.sectionId, null === tempUser || void 0 === tempUser ? void 0 : tempUser.studentId, null === tempUser || void 0 === tempUser ? void 0 : tempUser.schoolName, null === tempUser || void 0 === tempUser ? void 0 : tempUser.sectionName, null === tempUser || void 0 === tempUser ? void 0 : tempUser.currentReward, null === tempUser || void 0 === tempUser ? void 0 : tempUser.last5Lessons);
+                tempUser.isConnected ? user = tempUser : user.isConnected = false;
+              }
+              studentMap || (user.isConnected = false);
+              profile_1.default.setItem(profile_1.CURRENTMODE, constants_1.Mode.HomeConnect);
+              profile_1.User.setCurrentUser(user);
+              profile_1.User.storeUser(user);
+              util_1.Util.preloadStartScene(_this.node, cc.director.getScene().getChildByName("Canvas").getChildByName("loading"));
+            } else {
+              cc.log("userButtonCallback in normal");
+              profile_1.default.setItem(profile_1.CURRENTMODE, constants_1.Mode.Home);
+              profile_1.User.setCurrentUser(user);
+              util_1.Util.preloadStartScene(_this.node, cc.director.getScene().getChildByName("Canvas").getChildByName("loading"));
+            }
           }
         });
       };
