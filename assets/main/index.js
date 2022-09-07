@@ -575,439 +575,6 @@ window.__require = function e(t, n, r) {
     Object.defineProperty(exports, "__esModule", {
       value: true
     });
-    var core = require("@capacitor/core");
-    exports.Directory = void 0;
-    (function(Directory) {
-      Directory["Documents"] = "DOCUMENTS";
-      Directory["Data"] = "DATA";
-      Directory["Library"] = "LIBRARY";
-      Directory["Cache"] = "CACHE";
-      Directory["External"] = "EXTERNAL";
-      Directory["ExternalStorage"] = "EXTERNAL_STORAGE";
-    })(exports.Directory || (exports.Directory = {}));
-    exports.Encoding = void 0;
-    (function(Encoding) {
-      Encoding["UTF8"] = "utf8";
-      Encoding["ASCII"] = "ascii";
-      Encoding["UTF16"] = "utf16";
-    })(exports.Encoding || (exports.Encoding = {}));
-    const FilesystemDirectory = exports.Directory;
-    const FilesystemEncoding = exports.Encoding;
-    const Filesystem = core.registerPlugin("Filesystem", {
-      web: () => Promise.resolve().then(function() {
-        return web;
-      }).then(m => new m.FilesystemWeb())
-    });
-    function resolve(path) {
-      const posix = path.split("/").filter(item => "." !== item);
-      const newPosix = [];
-      posix.forEach(item => {
-        ".." === item && newPosix.length > 0 && ".." !== newPosix[newPosix.length - 1] ? newPosix.pop() : newPosix.push(item);
-      });
-      return newPosix.join("/");
-    }
-    function isPathParent(parent, children) {
-      parent = resolve(parent);
-      children = resolve(children);
-      const pathsA = parent.split("/");
-      const pathsB = children.split("/");
-      return parent !== children && pathsA.every((value, index) => value === pathsB[index]);
-    }
-    class FilesystemWeb extends core.WebPlugin {
-      constructor() {
-        super(...arguments);
-        this.DB_VERSION = 1;
-        this.DB_NAME = "Disc";
-        this._writeCmds = [ "add", "put", "delete" ];
-      }
-      async initDb() {
-        if (void 0 !== this._db) return this._db;
-        if (!("indexedDB" in window)) throw this.unavailable("This browser doesn't support IndexedDB");
-        return new Promise((resolve, reject) => {
-          const request = indexedDB.open(this.DB_NAME, this.DB_VERSION);
-          request.onupgradeneeded = FilesystemWeb.doUpgrade;
-          request.onsuccess = () => {
-            this._db = request.result;
-            resolve(request.result);
-          };
-          request.onerror = () => reject(request.error);
-          request.onblocked = () => {
-            console.warn("db blocked");
-          };
-        });
-      }
-      static doUpgrade(event) {
-        const eventTarget = event.target;
-        const db = eventTarget.result;
-        switch (event.oldVersion) {
-         case 0:
-         case 1:
-         default:
-          {
-            db.objectStoreNames.contains("FileStorage") && db.deleteObjectStore("FileStorage");
-            const store = db.createObjectStore("FileStorage", {
-              keyPath: "path"
-            });
-            store.createIndex("by_folder", "folder");
-          }
-        }
-      }
-      async dbRequest(cmd, args) {
-        const readFlag = -1 !== this._writeCmds.indexOf(cmd) ? "readwrite" : "readonly";
-        return this.initDb().then(conn => new Promise((resolve, reject) => {
-          const tx = conn.transaction([ "FileStorage" ], readFlag);
-          const store = tx.objectStore("FileStorage");
-          const req = store[cmd](...args);
-          req.onsuccess = () => resolve(req.result);
-          req.onerror = () => reject(req.error);
-        }));
-      }
-      async dbIndexRequest(indexName, cmd, args) {
-        const readFlag = -1 !== this._writeCmds.indexOf(cmd) ? "readwrite" : "readonly";
-        return this.initDb().then(conn => new Promise((resolve, reject) => {
-          const tx = conn.transaction([ "FileStorage" ], readFlag);
-          const store = tx.objectStore("FileStorage");
-          const index = store.index(indexName);
-          const req = index[cmd](...args);
-          req.onsuccess = () => resolve(req.result);
-          req.onerror = () => reject(req.error);
-        }));
-      }
-      getPath(directory, uriPath) {
-        const cleanedUriPath = void 0 !== uriPath ? uriPath.replace(/^[/]+|[/]+$/g, "") : "";
-        let fsPath = "";
-        void 0 !== directory && (fsPath += "/" + directory);
-        "" !== uriPath && (fsPath += "/" + cleanedUriPath);
-        return fsPath;
-      }
-      async clear() {
-        const conn = await this.initDb();
-        const tx = conn.transaction([ "FileStorage" ], "readwrite");
-        const store = tx.objectStore("FileStorage");
-        store.clear();
-      }
-      async readFile(options) {
-        const path = this.getPath(options.directory, options.path);
-        const entry = await this.dbRequest("get", [ path ]);
-        if (void 0 === entry) throw Error("File does not exist.");
-        return {
-          data: entry.content ? entry.content : ""
-        };
-      }
-      async writeFile(options) {
-        const path = this.getPath(options.directory, options.path);
-        let data = options.data;
-        const encoding = options.encoding;
-        const doRecursive = options.recursive;
-        const occupiedEntry = await this.dbRequest("get", [ path ]);
-        if (occupiedEntry && "directory" === occupiedEntry.type) throw Error("The supplied path is a directory.");
-        const parentPath = path.substr(0, path.lastIndexOf("/"));
-        const parentEntry = await this.dbRequest("get", [ parentPath ]);
-        if (void 0 === parentEntry) {
-          const subDirIndex = parentPath.indexOf("/", 1);
-          if (-1 !== subDirIndex) {
-            const parentArgPath = parentPath.substr(subDirIndex);
-            await this.mkdir({
-              path: parentArgPath,
-              directory: options.directory,
-              recursive: doRecursive
-            });
-          }
-        }
-        if (!encoding) {
-          data = data.indexOf(",") >= 0 ? data.split(",")[1] : data;
-          if (!this.isBase64String(data)) throw Error("The supplied data is not valid base64 content.");
-        }
-        const now = Date.now();
-        const pathObj = {
-          path: path,
-          folder: parentPath,
-          type: "file",
-          size: data.length,
-          ctime: now,
-          mtime: now,
-          content: data
-        };
-        await this.dbRequest("put", [ pathObj ]);
-        return {
-          uri: pathObj.path
-        };
-      }
-      async appendFile(options) {
-        const path = this.getPath(options.directory, options.path);
-        let data = options.data;
-        const encoding = options.encoding;
-        const parentPath = path.substr(0, path.lastIndexOf("/"));
-        const now = Date.now();
-        let ctime = now;
-        const occupiedEntry = await this.dbRequest("get", [ path ]);
-        if (occupiedEntry && "directory" === occupiedEntry.type) throw Error("The supplied path is a directory.");
-        const parentEntry = await this.dbRequest("get", [ parentPath ]);
-        if (void 0 === parentEntry) {
-          const subDirIndex = parentPath.indexOf("/", 1);
-          if (-1 !== subDirIndex) {
-            const parentArgPath = parentPath.substr(subDirIndex);
-            await this.mkdir({
-              path: parentArgPath,
-              directory: options.directory,
-              recursive: true
-            });
-          }
-        }
-        if (!encoding && !this.isBase64String(data)) throw Error("The supplied data is not valid base64 content.");
-        if (void 0 !== occupiedEntry) {
-          data = void 0 === occupiedEntry.content || encoding ? occupiedEntry.content + data : btoa(atob(occupiedEntry.content) + atob(data));
-          ctime = occupiedEntry.ctime;
-        }
-        const pathObj = {
-          path: path,
-          folder: parentPath,
-          type: "file",
-          size: data.length,
-          ctime: ctime,
-          mtime: now,
-          content: data
-        };
-        await this.dbRequest("put", [ pathObj ]);
-      }
-      async deleteFile(options) {
-        const path = this.getPath(options.directory, options.path);
-        const entry = await this.dbRequest("get", [ path ]);
-        if (void 0 === entry) throw Error("File does not exist.");
-        const entries = await this.dbIndexRequest("by_folder", "getAllKeys", [ IDBKeyRange.only(path) ]);
-        if (0 !== entries.length) throw Error("Folder is not empty.");
-        await this.dbRequest("delete", [ path ]);
-      }
-      async mkdir(options) {
-        const path = this.getPath(options.directory, options.path);
-        const doRecursive = options.recursive;
-        const parentPath = path.substr(0, path.lastIndexOf("/"));
-        const depth = (path.match(/\//g) || []).length;
-        const parentEntry = await this.dbRequest("get", [ parentPath ]);
-        const occupiedEntry = await this.dbRequest("get", [ path ]);
-        if (1 === depth) throw Error("Cannot create Root directory");
-        if (void 0 !== occupiedEntry) throw Error("Current directory does already exist.");
-        if (!doRecursive && 2 !== depth && void 0 === parentEntry) throw Error("Parent directory must exist");
-        if (doRecursive && 2 !== depth && void 0 === parentEntry) {
-          const parentArgPath = parentPath.substr(parentPath.indexOf("/", 1));
-          await this.mkdir({
-            path: parentArgPath,
-            directory: options.directory,
-            recursive: doRecursive
-          });
-        }
-        const now = Date.now();
-        const pathObj = {
-          path: path,
-          folder: parentPath,
-          type: "directory",
-          size: 0,
-          ctime: now,
-          mtime: now
-        };
-        await this.dbRequest("put", [ pathObj ]);
-      }
-      async rmdir(options) {
-        const {path: path, directory: directory, recursive: recursive} = options;
-        const fullPath = this.getPath(directory, path);
-        const entry = await this.dbRequest("get", [ fullPath ]);
-        if (void 0 === entry) throw Error("Folder does not exist.");
-        if ("directory" !== entry.type) throw Error("Requested path is not a directory");
-        const readDirResult = await this.readdir({
-          path: path,
-          directory: directory
-        });
-        if (0 !== readDirResult.files.length && !recursive) throw Error("Folder is not empty");
-        for (const entry of readDirResult.files) {
-          const entryPath = `${path}/${entry.name}`;
-          const entryObj = await this.stat({
-            path: entryPath,
-            directory: directory
-          });
-          "file" === entryObj.type ? await this.deleteFile({
-            path: entryPath,
-            directory: directory
-          }) : await this.rmdir({
-            path: entryPath,
-            directory: directory,
-            recursive: recursive
-          });
-        }
-        await this.dbRequest("delete", [ fullPath ]);
-      }
-      async readdir(options) {
-        const path = this.getPath(options.directory, options.path);
-        const entry = await this.dbRequest("get", [ path ]);
-        if ("" !== options.path && void 0 === entry) throw Error("Folder does not exist.");
-        const entries = await this.dbIndexRequest("by_folder", "getAllKeys", [ IDBKeyRange.only(path) ]);
-        const files = await Promise.all(entries.map(async e => {
-          let subEntry = await this.dbRequest("get", [ e ]);
-          void 0 === subEntry && (subEntry = await this.dbRequest("get", [ e + "/" ]));
-          return {
-            name: e.substring(path.length + 1),
-            type: subEntry.type,
-            size: subEntry.size,
-            ctime: subEntry.ctime,
-            mtime: subEntry.mtime,
-            uri: subEntry.path
-          };
-        }));
-        return {
-          files: files
-        };
-      }
-      async getUri(options) {
-        const path = this.getPath(options.directory, options.path);
-        let entry = await this.dbRequest("get", [ path ]);
-        void 0 === entry && (entry = await this.dbRequest("get", [ path + "/" ]));
-        return {
-          uri: (null === entry || void 0 === entry ? void 0 : entry.path) || path
-        };
-      }
-      async stat(options) {
-        const path = this.getPath(options.directory, options.path);
-        let entry = await this.dbRequest("get", [ path ]);
-        void 0 === entry && (entry = await this.dbRequest("get", [ path + "/" ]));
-        if (void 0 === entry) throw Error("Entry does not exist.");
-        return {
-          type: entry.type,
-          size: entry.size,
-          ctime: entry.ctime,
-          mtime: entry.mtime,
-          uri: entry.path
-        };
-      }
-      async rename(options) {
-        await this._copy(options, true);
-        return;
-      }
-      async copy(options) {
-        return this._copy(options, false);
-      }
-      async requestPermissions() {
-        return {
-          publicStorage: "granted"
-        };
-      }
-      async checkPermissions() {
-        return {
-          publicStorage: "granted"
-        };
-      }
-      async _copy(options, doRename = false) {
-        let {toDirectory: toDirectory} = options;
-        const {to: to, from: from, directory: fromDirectory} = options;
-        if (!to || !from) throw Error("Both to and from must be provided");
-        toDirectory || (toDirectory = fromDirectory);
-        const fromPath = this.getPath(fromDirectory, from);
-        const toPath = this.getPath(toDirectory, to);
-        if (fromPath === toPath) return {
-          uri: toPath
-        };
-        if (isPathParent(fromPath, toPath)) throw Error("To path cannot contain the from path");
-        let toObj;
-        try {
-          toObj = await this.stat({
-            path: to,
-            directory: toDirectory
-          });
-        } catch (e) {
-          const toPathComponents = to.split("/");
-          toPathComponents.pop();
-          const toPath = toPathComponents.join("/");
-          if (toPathComponents.length > 0) {
-            const toParentDirectory = await this.stat({
-              path: toPath,
-              directory: toDirectory
-            });
-            if ("directory" !== toParentDirectory.type) throw new Error("Parent directory of the to path is a file");
-          }
-        }
-        if (toObj && "directory" === toObj.type) throw new Error("Cannot overwrite a directory with a file");
-        const fromObj = await this.stat({
-          path: from,
-          directory: fromDirectory
-        });
-        const updateTime = async (path, ctime, mtime) => {
-          const fullPath = this.getPath(toDirectory, path);
-          const entry = await this.dbRequest("get", [ fullPath ]);
-          entry.ctime = ctime;
-          entry.mtime = mtime;
-          await this.dbRequest("put", [ entry ]);
-        };
-        const ctime = fromObj.ctime ? fromObj.ctime : Date.now();
-        switch (fromObj.type) {
-         case "file":
-          {
-            const file = await this.readFile({
-              path: from,
-              directory: fromDirectory
-            });
-            doRename && await this.deleteFile({
-              path: from,
-              directory: fromDirectory
-            });
-            const writeResult = await this.writeFile({
-              path: to,
-              directory: toDirectory,
-              data: file.data
-            });
-            doRename && await updateTime(to, ctime, fromObj.mtime);
-            return writeResult;
-          }
-
-         case "directory":
-          {
-            if (toObj) throw Error("Cannot move a directory over an existing object");
-            try {
-              await this.mkdir({
-                path: to,
-                directory: toDirectory,
-                recursive: false
-              });
-              doRename && await updateTime(to, ctime, fromObj.mtime);
-            } catch (e) {}
-            const contents = (await this.readdir({
-              path: from,
-              directory: fromDirectory
-            })).files;
-            for (const filename of contents) await this._copy({
-              from: `${from}/${filename}`,
-              to: `${to}/${filename}`,
-              directory: fromDirectory,
-              toDirectory: toDirectory
-            }, doRename);
-            doRename && await this.rmdir({
-              path: from,
-              directory: fromDirectory
-            });
-          }
-        }
-        return {
-          uri: toPath
-        };
-      }
-      isBase64String(str) {
-        const base64regex = /^([0-9a-zA-Z+/]{4})*(([0-9a-zA-Z+/]{2}==)|([0-9a-zA-Z+/]{3}=))?$/;
-        return base64regex.test(str);
-      }
-    }
-    FilesystemWeb._debug = true;
-    var web = Object.freeze({
-      __proto__: null,
-      FilesystemWeb: FilesystemWeb
-    });
-    exports.Filesystem = Filesystem;
-    exports.FilesystemDirectory = FilesystemDirectory;
-    exports.FilesystemEncoding = FilesystemEncoding;
-  }, {
-    "@capacitor/core": 1
-  } ],
-  3: [ function(require, module, exports) {
-    "use strict";
-    Object.defineProperty(exports, "__esModule", {
-      value: true
-    });
     var tslib = require("tslib");
     var firebase = require("@firebase/app");
     require("@firebase/installations");
@@ -1817,14 +1384,14 @@ window.__require = function e(t, n, r) {
     exports.resetGlobalVars = resetGlobalVars;
     exports.settings = settings;
   }, {
-    "@firebase/app": 5,
-    "@firebase/component": 7,
-    "@firebase/installations": 9,
-    "@firebase/logger": 11,
-    "@firebase/util": 12,
-    tslib: 4
+    "@firebase/app": 4,
+    "@firebase/component": 6,
+    "@firebase/installations": 8,
+    "@firebase/logger": 10,
+    "@firebase/util": 11,
+    tslib: 3
   } ],
-  4: [ function(require, module, exports) {
+  3: [ function(require, module, exports) {
     (function(global) {
       var __extends;
       var __assign;
@@ -2197,7 +1764,7 @@ window.__require = function e(t, n, r) {
       });
     }).call(this, "undefined" !== typeof global ? global : "undefined" !== typeof self ? self : "undefined" !== typeof window ? window : {});
   }, {} ],
-  5: [ function(require, module, exports) {
+  4: [ function(require, module, exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", {
       value: true
@@ -2534,17 +2101,17 @@ window.__require = function e(t, n, r) {
     exports.default = firebase$1;
     exports.firebase = firebase$1;
   }, {
-    "@firebase/component": 7,
-    "@firebase/logger": 11,
-    "@firebase/util": 12,
-    tslib: 6
+    "@firebase/component": 6,
+    "@firebase/logger": 10,
+    "@firebase/util": 11,
+    tslib: 5
+  } ],
+  5: [ function(require, module, exports) {
+    arguments[4][3][0].apply(exports, arguments);
+  }, {
+    dup: 3
   } ],
   6: [ function(require, module, exports) {
-    arguments[4][4][0].apply(exports, arguments);
-  }, {
-    dup: 4
-  } ],
-  7: [ function(require, module, exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", {
       value: true
@@ -2727,15 +2294,15 @@ window.__require = function e(t, n, r) {
     exports.ComponentContainer = ComponentContainer;
     exports.Provider = Provider;
   }, {
-    "@firebase/util": 12,
-    tslib: 8
+    "@firebase/util": 11,
+    tslib: 7
+  } ],
+  7: [ function(require, module, exports) {
+    arguments[4][3][0].apply(exports, arguments);
+  }, {
+    dup: 3
   } ],
   8: [ function(require, module, exports) {
-    arguments[4][4][0].apply(exports, arguments);
-  }, {
-    dup: 4
-  } ],
-  9: [ function(require, module, exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", {
       value: true
@@ -3670,18 +3237,18 @@ window.__require = function e(t, n, r) {
     registerInstallations(firebase__default["default"]);
     exports.registerInstallations = registerInstallations;
   }, {
-    "@firebase/app": 5,
-    "@firebase/component": 7,
-    "@firebase/util": 12,
-    idb: 16,
-    tslib: 10
+    "@firebase/app": 4,
+    "@firebase/component": 6,
+    "@firebase/util": 11,
+    idb: 15,
+    tslib: 9
+  } ],
+  9: [ function(require, module, exports) {
+    arguments[4][3][0].apply(exports, arguments);
+  }, {
+    dup: 3
   } ],
   10: [ function(require, module, exports) {
-    arguments[4][4][0].apply(exports, arguments);
-  }, {
-    dup: 4
-  } ],
-  11: [ function(require, module, exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", {
       value: true
@@ -3840,7 +3407,7 @@ window.__require = function e(t, n, r) {
     exports.setLogLevel = setLogLevel;
     exports.setUserLogHandler = setUserLogHandler;
   }, {} ],
-  12: [ function(require, module, exports) {
+  11: [ function(require, module, exports) {
     (function(global) {
       "use strict";
       Object.defineProperty(exports, "__esModule", {
@@ -4637,20 +4204,20 @@ window.__require = function e(t, n, r) {
       exports.validateNamespace = validateNamespace;
     }).call(this, "undefined" !== typeof global ? global : "undefined" !== typeof self ? self : "undefined" !== typeof window ? window : {});
   }, {
-    tslib: 13
+    tslib: 12
+  } ],
+  12: [ function(require, module, exports) {
+    arguments[4][3][0].apply(exports, arguments);
+  }, {
+    dup: 3
   } ],
   13: [ function(require, module, exports) {
-    arguments[4][4][0].apply(exports, arguments);
-  }, {
-    dup: 4
-  } ],
-  14: [ function(require, module, exports) {
     "use strict";
     require("@firebase/analytics");
   }, {
-    "@firebase/analytics": 3
+    "@firebase/analytics": 2
   } ],
-  15: [ function(require, module, exports) {
+  14: [ function(require, module, exports) {
     "use strict";
     var firebase = require("@firebase/app");
     function _interopDefaultLegacy(e) {
@@ -4664,9 +4231,9 @@ window.__require = function e(t, n, r) {
     firebase__default["default"].registerVersion(name, version, "app");
     module.exports = firebase__default["default"];
   }, {
-    "@firebase/app": 5
+    "@firebase/app": 4
   } ],
-  16: [ function(require, module, exports) {
+  15: [ function(require, module, exports) {
     (function(global, factory) {
       "object" === typeof exports && "undefined" !== typeof module ? factory(exports) : "function" === typeof define && define.amd ? define([ "exports" ], factory) : (global = global || self, 
       factory(global.idb = {}));
@@ -7583,7 +7150,6 @@ window.__require = function e(t, n, r) {
     var gameConfigs_1 = require("./gameConfigs");
     var constants_1 = require("./constants");
     var core_1 = require("@capacitor/core");
-    var filesystem_1 = require("@capacitor/filesystem");
     exports.DEFAULT_FONT = "main";
     exports.STORY = "story";
     exports.COURSES = [ "en", "en-maths", "hi", "hi-maths", "ur", "ur-maths", "mr" ];
@@ -8040,13 +7606,6 @@ window.__require = function e(t, n, r) {
         cc.assetManager.loadBundle(lessonId, function(err, bundle) {
           var _a;
           if (err) if ("android" === core_1.Capacitor.getPlatform()) {
-            filesystem_1.Filesystem.getUri({
-              directory: filesystem_1.Directory.Data,
-              path: ""
-            }).then(function(dirPath) {
-              var path1 = "http://localhost/_capacitor_file_/" + dirPath.uri.substring(8) + "/" + lessonId;
-              console.log("cocos path", path1);
-            });
             var gameUrl = null !== (_a = cc.sys.localStorage.getItem("gameUrl")) && void 0 !== _a ? _a : "http://localhost/_capacitor_file_/data/user/0/org.chimple.cuba/files/";
             console.log("gameUrl", gameUrl, cc.sys.localStorage.getItem("gameUrl"));
             var path_1 = gameUrl + lessonId;
@@ -8078,8 +7637,7 @@ window.__require = function e(t, n, r) {
     "./constants": "constants",
     "./gameConfigs": "gameConfigs",
     "./profile": "profile",
-    "@capacitor/core": 1,
-    "@capacitor/filesystem": 2
+    "@capacitor/core": 1
   } ],
   constants: [ function(require, module, exports) {
     "use strict";
@@ -11638,6 +11196,14 @@ window.__require = function e(t, n, r) {
           mlClassId: config.lesson.mlClassId || null,
           mlPartnerId: config.lesson.mlPartnerId || null
         };
+        var isIframe = !(window === window.parent);
+        if (isIframe) {
+          var customEvent = new CustomEvent("problemEnd", {
+            detail: event
+          });
+          window.parent.document.body.dispatchEvent(customEvent);
+          console.log("problemEnd event dispatched", customEvent);
+        }
         util_logger_1.default.logChimpleEvent(eventName, event);
         if (!config_1.default.isMicroLink) {
           var deviceId = util_logger_1.default.currentDeviceId();
@@ -18374,8 +17940,8 @@ window.__require = function e(t, n, r) {
     "../../chimple": "chimple",
     "./lib/constants": "constants",
     "./lib/profile": "profile",
-    "firebase/analytics": 14,
-    "firebase/app": 15
+    "firebase/analytics": 13,
+    "firebase/app": 14
   } ],
   util: [ function(require, module, exports) {
     "use strict";
