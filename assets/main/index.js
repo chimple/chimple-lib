@@ -14603,6 +14603,8 @@ window.__require = function e(t, n, r) {
         cc.log("resources left: ---\x3e", this._resources.length);
       };
       Util.load = function(res, callback, needsRelease) {
+        var _this = this;
+        var _a, _b;
         void 0 === needsRelease && (needsRelease = true);
         Util.bundles.get(profile_1.default.lang + "-help") || cc.assetManager.loadBundle(profile_1.default.lang + "-help", function(err, bundle) {
           Util.bundles.set(profile_1.default.lang + "-help", bundle);
@@ -14612,15 +14614,33 @@ window.__require = function e(t, n, r) {
         var lessonName = resArray[1];
         var resDir = resArray.slice(2).join("/");
         var resName = resDir.split(".")[0];
+        var ext = resDir.split(".")[1];
         var bundle = this.bundles.get("course" == lessonName ? courseName : lessonName);
+        console.log("Config.i.course.isCourseMapped ", null === (_a = config_1.default.i.course) || void 0 === _a ? void 0 : _a.isCourseMapped);
+        if (!bundle && (null === (_b = config_1.default.i.course) || void 0 === _b ? void 0 : _b.isCourseMapped)) {
+          console.log("LessonController.bundles", lessonController_1.default.bundles);
+          lessonController_1.default.bundles.forEach(function(element) {
+            console.log("bundles ", element.name, _this.bundles.get(element.name));
+            bundle = _this.bundles.get(element.name);
+            "mp3" === ext || "m4a" === ext ? bundle.load(resName, cc.AudioClip, function(err, asset) {
+              err && cc.log(JSON.stringify(err));
+              callback(err, asset);
+            }) : "png" === ext || "jpg" === ext ? bundle.load(resName, cc.Texture2D, function(err, asset) {
+              err && cc.log(JSON.stringify(err));
+              callback(err, asset);
+            }) : bundle.load(resName, function(err, asset) {
+              err && cc.log(JSON.stringify(err));
+              callback(err, asset);
+            });
+          });
+        }
         console.log("resArray", resArray);
         console.log("courseName", courseName);
         console.log("lessonName", lessonName);
         console.log("resDir", resDir);
         console.log("resName", resName);
-        console.log("bundle", bundle);
+        console.log("bundle", bundle, profile_1.default.lang + "-help");
         console.log("this.bundles", this.bundles);
-        var ext = resDir.split(".")[1];
         "mp3" === ext || "m4a" === ext ? bundle.load(resName, cc.AudioClip, function(err, asset) {
           err && cc.log(JSON.stringify(err));
           callback(err, asset);
